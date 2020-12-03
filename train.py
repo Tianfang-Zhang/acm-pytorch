@@ -13,7 +13,7 @@ import numpy as np
 
 from utils.data import SirstDataset
 from utils.lr_scheduler import adjust_learning_rate
-from model.segmentation import ASKCResNetFPN
+from model.segmentation import ASKCResNetFPN, ASKCResUNet
 from model.loss import SoftLoULoss
 from model.metrics import SigmoidMetric, SamplewiseSigmoidMetric
 
@@ -34,6 +34,14 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=300, help='number of epochs')
     parser.add_argument('--warm-up-epochs', type=int, default=0, help='warm up epochs')
     parser.add_argument('--learning_rate', type=float, default=0.05, help='learning rate')
+
+    #
+    # Net parameters
+    #
+    parser.add_argument('--backbone-mode', type=str, default='UNet', help='backbone mode: ResNet, UNet')
+    parser.add_argument('--fuse-mode', type=str, default='BiGlobal', help='fuse mode: BiLocal, AsymBi, BiGlobal')
+    parser.add_argument('--blocks-per-layer', type=int, default=4, help='blocks per layer')
+
 
     #
     # Saving files
@@ -60,7 +68,17 @@ class Trainer(object):
         self.val_data_loader = Data.DataLoader(valset, batch_size=args.batch_size)
 
         ## model
-        self.net = ASKCResNetFPN()
+        layer_blocks = [args.blocks_per_layer] * 3
+        channels = [8, 16, 32, 64]
+        assert args.backbone_mode in ['ResNet', 'UNet']
+        if args.backbone_mode == 'ResNet':
+            self.net = ASKCResNetFPN(layer_blocks, channels, args.fuse_mode)
+        elif args.backbone_mode == 'UNet':
+            self.net = ASKCResUNet(layer_blocks, channels, args.fuse_mode)
+        else:
+            NameError
+
+        self.net = ASKCResNetFPN(layer_blocks, channels)
         # print(self.net)
         self.net.apply(self.weight_init)
         self.net = self.net.cuda()

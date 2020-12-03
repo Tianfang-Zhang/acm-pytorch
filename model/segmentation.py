@@ -2,11 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .fusion import AsymBiChaFuseReduce
+from .fusion import AsymBiChaFuseReduce, BiLocalChaFuseReduce, BiGlobalChaFuseReduce
 
-class CIFARBasicBlockV1(nn.Module):
+
+class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride, downsample):
-        super(CIFARBasicBlockV1, self).__init__()
+        super(ResidualBlock, self).__init__()
         self.body = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, 3, stride, 1, bias=False),
             nn.BatchNorm2d(out_channels),
@@ -51,36 +52,37 @@ class _FCNHead(nn.Module):
 
 
 class ASKCResNetFPN(nn.Module):
-    def __init__(self):
+    def __init__(self, layer_blocks, channels, fuse_mode='AsymBi'):
         super(ASKCResNetFPN, self).__init__()
 
+        stem_width = channels[0]
         self.stem = nn.Sequential(
             nn.BatchNorm2d(3),
-            nn.Conv2d(3, 8, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(8),
+            nn.Conv2d(3, stem_width, 3, 2, 1, bias=False),
+            nn.BatchNorm2d(stem_width),
             nn.ReLU(True),
 
-            nn.Conv2d(8, 8, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(8),
+            nn.Conv2d(stem_width, stem_width, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(stem_width),
             nn.ReLU(True),
 
-            nn.Conv2d(8, 16, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(stem_width, stem_width*2, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(stem_width*2),
             nn.ReLU(True),
             nn.MaxPool2d(3, 2, 1)
         )
 
-        self.layer1 = self._make_layer(block=CIFARBasicBlockV1, layer_num=4,
-                                       in_channels=16, out_channels=16, stride=1)
-        self.layer2 = self._make_layer(block=CIFARBasicBlockV1, layer_num=4,
-                                       in_channels=16, out_channels=32, stride=2)
-        self.layer3 = self._make_layer(block=CIFARBasicBlockV1, layer_num=4,
-                                       in_channels=32, out_channels=64, stride=2)
+        self.layer1 = self._make_layer(block=ResidualBlock, block_num=layer_blocks[0],
+                                       in_channels=channels[1], out_channels=channels[1], stride=1)
+        self.layer2 = self._make_layer(block=ResidualBlock, block_num=layer_blocks[1],
+                                       in_channels=channels[1], out_channels=channels[2], stride=2)
+        self.layer3 = self._make_layer(block=ResidualBlock, block_num=layer_blocks[2],
+                                       in_channels=channels[2], out_channels=channels[3], stride=2)
 
-        self.fuse23 = self._fuse_layer(64, 32, 32)
-        self.fuse12 = self._fuse_layer(32, 16, 16)
+        self.fuse23 = self._fuse_layer(channels[3], channels[2], channels[2], fuse_mode)
+        self.fuse12 = self._fuse_layer(channels[2], channels[1], channels[1], fuse_mode)
 
-        self.head = _FCNHead(16, 1)
+        self.head = _FCNHead(channels[1], 1)
 
     def forward(self, x):
         _, _, hei, wid = x.shape
@@ -101,14 +103,105 @@ class ASKCResNetFPN(nn.Module):
 
         return out
 
-    def _make_layer(self, block, layer_num, in_channels, out_channels, stride):
+    def _make_layer(self, block, block_num, in_channels, out_channels, stride):
         downsample = (in_channels != out_channels) or (stride != 1)
         layer = []
         layer.append(block(in_channels, out_channels, stride, downsample))
-        for _ in range(layer_num-1):
+        for _ in range(block_num-1):
             layer.append(block(out_channels, out_channels, 1, False))
         return nn.Sequential(*layer)
 
     def _fuse_layer(self, in_high_channels, in_low_channels, out_channels, fuse_mode='AsymBi'):
-        layer = AsymBiChaFuseReduce(in_high_channels, in_low_channels, out_channels)
-        return layer
+        assert fuse_mode in ['BiLocal', 'AsymBi', 'BiGlobal']
+        if fuse_mode == 'BiLocal':
+            fuse_layer = BiLocalChaFuseReduce(in_high_channels, in_low_channels, out_channels)
+        elif fuse_mode == 'AsymBi':
+            fuse_layer = AsymBiChaFuseReduce(in_high_channels, in_low_channels, out_channels)
+        elif fuse_mode == 'BiGlobal':
+            fuse_layer = BiGlobalChaFuseReduce(in_high_channels, in_low_channels, out_channels)
+        else:
+            NameError
+        return fuse_layer
+
+
+class ASKCResUNet(nn.Module):
+    def __init__(self, layer_blocks, channels, fuse_mode='AsymBi'):
+        super(ASKCResUNet, self).__init__()
+
+        stem_width = int(channels[0])
+        self.stem = nn.Sequential(
+            nn.BatchNorm2d(3),
+            nn.Conv2d(3, stem_width, 3, 2, 1, bias=False),
+            nn.BatchNorm2d(stem_width),
+            nn.ReLU(True),
+
+            nn.Conv2d(stem_width, stem_width, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(stem_width),
+            nn.ReLU(True),
+
+            nn.Conv2d(stem_width, 2*stem_width, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(2*stem_width),
+            nn.ReLU(True),
+
+            nn.MaxPool2d(3, 2, 1),
+        )
+
+        self.layer1 = self._make_layer(block=ResidualBlock, block_num=layer_blocks[0],
+                                       in_channels=channels[1], out_channels=channels[1], stride=1)
+        self.layer2 = self._make_layer(block=ResidualBlock, block_num=layer_blocks[1],
+                                       in_channels=channels[1], out_channels=channels[2], stride=2)
+        self.layer3 = self._make_layer(block=ResidualBlock, block_num=layer_blocks[2],
+                                       in_channels=channels[2], out_channels=channels[3], stride=2)
+
+        self.deconv2 = nn.ConvTranspose2d(channels[3], channels[2], 4, 2, 1)
+        self.uplayer2 = self._make_layer(block=ResidualBlock, block_num=layer_blocks[1],
+                                         in_channels=channels[2], out_channels=channels[2], stride=1)
+        self.fuse2 = self._fuse_layer(channels[3], channels[2], channels[2], fuse_mode)
+        self.deconv1 = nn.ConvTranspose2d(channels[2], channels[1], 4, 2, 1)
+        self.uplayer1 = self._make_layer(block=ResidualBlock, block_num=layer_blocks[0],
+                                         in_channels=channels[1], out_channels=channels[1], stride=1)
+        self.fuse1 = self._fuse_layer(channels[2], channels[1], channels[1], fuse_mode)
+
+        self.head = _FCNHead(channels[1], 1)
+
+    def forward(self, x):
+        _, _, hei, wid = x.shape
+
+        x = self.stem(x)
+        c1 = self.layer1(x)
+        c2 = self.layer2(c1)
+        c3 = self.layer3(c2)
+
+        deconc2 = self.deconv2(c3)
+        fusec2 = self.fuse2(deconc2, c2)
+        upc2 = self.uplayer2(fusec2)
+
+        deconc1 = self.deconv1(upc2)
+        fusec1 = self.fuse1(deconc1, c1)
+        upc1 = self.uplayer1(fusec1)
+
+        pred = self.head(upc1)
+        out = F.interpolate(pred, size=[hei, wid], mode='bilinear')
+        return out
+
+
+
+    def _make_layer(self, block, block_num, in_channels, out_channels, stride):
+        layer = []
+        downsample = (in_channels != out_channels) or (stride != 1)
+        layer.append(block(in_channels, out_channels, stride, downsample))
+        for _ in range(block_num-1):
+            layer.append(block(out_channels, out_channels, 1, False))
+        return nn.Sequential(*layer)
+
+    def _fuse_layer(self, in_high_channels, in_low_channels, out_channels, fuse_mode='AsymBi'):
+        assert fuse_mode in ['BiLocal', 'AsymBi', 'BiGlobal']
+        if fuse_mode == 'BiLocal':
+            fuse_layer = BiLocalChaFuseReduce(in_high_channels, in_low_channels, out_channels)
+        elif fuse_mode == 'AsymBi':
+            fuse_layer = AsymBiChaFuseReduce(in_high_channels, in_low_channels, out_channels)
+        elif fuse_mode == 'BiGlobal':
+            fuse_layer = BiGlobalChaFuseReduce(in_high_channels, in_low_channels, out_channels)
+        else:
+            NameError
+        return fuse_layer
