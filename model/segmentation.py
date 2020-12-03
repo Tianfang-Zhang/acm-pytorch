@@ -154,13 +154,14 @@ class ASKCResUNet(nn.Module):
                                        in_channels=channels[2], out_channels=channels[3], stride=2)
 
         self.deconv2 = nn.ConvTranspose2d(channels[3], channels[2], 4, 2, 1)
+        self.fuse2 = self._fuse_layer(channels[2], channels[2], channels[2], fuse_mode)
         self.uplayer2 = self._make_layer(block=ResidualBlock, block_num=layer_blocks[1],
                                          in_channels=channels[2], out_channels=channels[2], stride=1)
-        self.fuse2 = self._fuse_layer(channels[3], channels[2], channels[2], fuse_mode)
+
         self.deconv1 = nn.ConvTranspose2d(channels[2], channels[1], 4, 2, 1)
+        self.fuse1 = self._fuse_layer(channels[1], channels[1], channels[1], fuse_mode)
         self.uplayer1 = self._make_layer(block=ResidualBlock, block_num=layer_blocks[0],
                                          in_channels=channels[1], out_channels=channels[1], stride=1)
-        self.fuse1 = self._fuse_layer(channels[2], channels[1], channels[1], fuse_mode)
 
         self.head = _FCNHead(channels[1], 1)
 
@@ -183,8 +184,6 @@ class ASKCResUNet(nn.Module):
         pred = self.head(upc1)
         out = F.interpolate(pred, size=[hei, wid], mode='bilinear')
         return out
-
-
 
     def _make_layer(self, block, block_num, in_channels, out_channels, stride):
         layer = []

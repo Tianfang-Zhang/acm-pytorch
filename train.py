@@ -38,8 +38,8 @@ def parse_args():
     #
     # Net parameters
     #
-    parser.add_argument('--backbone-mode', type=str, default='UNet', help='backbone mode: ResNet, UNet')
-    parser.add_argument('--fuse-mode', type=str, default='BiGlobal', help='fuse mode: BiLocal, AsymBi, BiGlobal')
+    parser.add_argument('--backbone-mode', type=str, default='ResNet', help='backbone mode: ResNet, UNet')
+    parser.add_argument('--fuse-mode', type=str, default='AsymBi', help='fuse mode: BiLocal, AsymBi, BiGlobal')
     parser.add_argument('--blocks-per-layer', type=int, default=4, help='blocks per layer')
 
 
@@ -78,7 +78,6 @@ class Trainer(object):
         else:
             NameError
 
-        self.net = ASKCResNetFPN(layer_blocks, channels)
         # print(self.net)
         self.net.apply(self.weight_init)
         self.net = self.net.cuda()
