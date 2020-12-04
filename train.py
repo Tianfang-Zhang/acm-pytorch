@@ -10,6 +10,7 @@ import os
 import os.path as ops
 import math
 import numpy as np
+import time
 
 from utils.data import SirstDataset
 from utils.lr_scheduler import adjust_learning_rate
@@ -38,28 +39,17 @@ def parse_args():
     #
     # Net parameters
     #
-    parser.add_argument('--backbone-mode', type=str, default='ResNet', help='backbone mode: ResNet, UNet')
+    parser.add_argument('--backbone-mode', type=str, default='FPN', help='backbone mode: FPN, UNet')
     parser.add_argument('--fuse-mode', type=str, default='AsymBi', help='fuse mode: BiLocal, AsymBi, BiGlobal')
     parser.add_argument('--blocks-per-layer', type=int, default=4, help='blocks per layer')
 
-
-    #
-    # Saving files
-    #
-    parser.add_argument('--model-name', type=str, default='test7', help='folder name')
-
     args = parser.parse_args()
-
     return args
 
 
 class Trainer(object):
     def __init__(self, args):
         self.args = args
-        self.writer = SummaryWriter(log_dir=ops.join('result', self.args.model_name))
-        self.writer.add_text('Parameters/epochs', 'epochs:%d' % args.epochs)
-        self.writer.add_text('Parameters/batch_size', 'epochs:%d' % args.batch_size)
-        self.writer.add_text('Parameters/learning_rate init', 'epochs:%f' % args.learning_rate)
 
         ## dataset
         trainset = SirstDataset(args, mode='train')
@@ -70,15 +60,14 @@ class Trainer(object):
         ## model
         layer_blocks = [args.blocks_per_layer] * 3
         channels = [8, 16, 32, 64]
-        assert args.backbone_mode in ['ResNet', 'UNet']
-        if args.backbone_mode == 'ResNet':
+        assert args.backbone_mode in ['FPN', 'UNet']
+        if args.backbone_mode == 'FPN':
             self.net = ASKCResNetFPN(layer_blocks, channels, args.fuse_mode)
         elif args.backbone_mode == 'UNet':
             self.net = ASKCResUNet(layer_blocks, channels, args.fuse_mode)
         else:
             NameError
 
-        # print(self.net)
         self.net.apply(self.weight_init)
         self.net = self.net.cuda()
 
@@ -95,9 +84,28 @@ class Trainer(object):
         self.best_nIoU = 0
 
         ## folders
-        if not ops.exists('result/'+self.args.model_name):
-            os.mkdir('result/'+self.args.model_name)
+        folder_name = '%s_%s_%s' % (time.strftime('%Y-%m-%d-%H-%M-%S',time.localtime(time.time())),
+                                         args.backbone_mode, args.fuse_mode)
+        self.save_folder = ops.join('result/', folder_name)
+        self.save_pkl = ops.join(self.save_folder, 'checkpoint')
+        if not ops.exists('result'):
+            os.mkdir('result')
+        if not ops.exists(self.save_folder):
+            os.mkdir(self.save_folder)
+        if not ops.exists(self.save_pkl):
+            os.mkdir(self.save_pkl)
 
+        ## SummaryWriter
+        self.writer = SummaryWriter(log_dir=self.save_folder)
+        self.writer.add_text(folder_name, 'Args:%s, ' % args)
+
+        ## Print info
+        print('folder: %s' % self.save_folder)
+        print('Args: %s' % args)
+        print('backbone: %s' % args.backbone_mode)
+        print('fuse mode: %s' % args.fuse_mode)
+        print('layer block number:', layer_blocks)
+        print('channels', channels)
 
     def training(self, epoch):
         # training step
@@ -119,13 +127,11 @@ class Trainer(object):
             tbar.set_description('Epoch:%3d, lr:%f, train loss:%f'
                                  % (epoch, trainer.optimizer.param_groups[0]['lr'], np.mean(losses)))
 
-        adjust_learning_rate(self.optimizer, epoch,
-                             args.epochs,
-                             args.learning_rate, args.warm_up_epochs, 1e-6)
+        adjust_learning_rate(self.optimizer, epoch, args.epochs, args.learning_rate,
+                             args.warm_up_epochs, 1e-6)
 
-        self.writer.add_scalar('Train/lr', trainer.optimizer.param_groups[0]['lr'], epoch)
-        self.writer.add_scalar('Train/loss', np.mean(losses), epoch)
-
+        self.writer.add_scalar('Losses/train loss', np.mean(losses), epoch)
+        self.writer.add_scalar('Learning rate/', trainer.optimizer.param_groups[0]['lr'], epoch)
 
     def validation(self, epoch):
         self.iou_metric.reset()
@@ -146,19 +152,22 @@ class Trainer(object):
             _, IoU = self.iou_metric.get()
             _, nIoU = self.nIoU_metric.get()
 
-            tbar.set_description('Epoch:%3d, eval loss:%f, IoU:%f, nIoU:%f'
+            tbar.set_description('  Epoch:%3d, eval loss:%f, IoU:%f, nIoU:%f'
                                  %(epoch, np.mean(eval_losses), IoU, nIoU))
 
-        self.writer.add_scalar('Val/eval_loss', np.mean(eval_losses), epoch)
-        self.writer.add_scalar('Val/IoU', IoU, epoch)
-        self.writer.add_scalar('Val/nIoU', nIoU, epoch)
+        pkl_name = 'Epoch-%3d_IoU-%.4f_nIoU-%.4f.pkl' % (epoch, IoU, nIoU)
+        if IoU > self.best_iou:
+            torch.save(self.net, ops.join(self.save_pkl, pkl_name))
+            self.best_iou = IoU
+        if nIoU > self.best_nIoU:
+            torch.save(self.net, ops.join(self.save_pkl, pkl_name))
+            self.best_nIoU = nIoU
 
-        if IoU > self.best_iou or nIoU > self.best_nIoU:
-            torch.save(self.net, ops.join('result', self.args.model_name, 'model.pkl'))
-            self.best_iou = IoU if IoU > self.best_iou else self.best_iou
-            self.best_nIoU = nIoU if nIoU > self.best_nIoU else self.best_nIoU
-
-
+        self.writer.add_scalar('Losses/eval_loss', np.mean(eval_losses), epoch)
+        self.writer.add_scalar('Eval/IoU', IoU, epoch)
+        self.writer.add_scalar('Eval/nIoU', nIoU, epoch)
+        self.writer.add_scalar('Best/IoU', self.best_iou, epoch)
+        self.writer.add_scalar('Best/nIoU', self.best_nIoU, epoch)
 
     def weight_init(self, m):
         if isinstance(m, nn.Conv2d):
@@ -172,15 +181,10 @@ class Trainer(object):
 if __name__ == '__main__':
     args = parse_args()
 
-    print('training...')
     trainer = Trainer(args)
     for epoch in range(1, args.epochs+1):
         trainer.training(epoch)
         trainer.validation(epoch)
-
-
-        # adjust_learning_rate(trainer.optimizer, epoch, args.epochs, args.learning_rate, args.warm_up_epochs)
-        # print('Epoch: %3d, lr: %.6f' % (epoch, trainer.optimizer.param_groups[0]['lr']))
 
     print('Best IoU: %.5f, best nIoU: %.5f' % (trainer.best_iou, trainer.best_nIoU))
 
